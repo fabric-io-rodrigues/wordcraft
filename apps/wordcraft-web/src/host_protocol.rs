@@ -110,7 +110,7 @@ pub(crate) fn accepted_name(name: &str, exts: &[&[&str]]) -> Result<String, Stri
     let ext = clean.rsplit_once('.').map(|(stem, e)| (stem, e.to_ascii_lowercase()));
     match ext {
         Some((stem, e)) if !stem.is_empty() && exts.iter().any(|list| list.contains(&e.as_str())) => Ok(clean.to_string()),
-        _ => Err(format!("{clean:?}: not a document or picture WordCraft opens")),
+        _ => Err(format!("{clean:?}: not a document WordCraft opens")),
     }
 }
 
