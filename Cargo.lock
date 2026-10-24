@@ -5408,6 +5408,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wordcraft-wasm"
+version = "0.10.0"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
+ "wordcraft-engine",
+ "wordcraft-fonts",
+]
+
+[[package]]
 name = "wordcraft-web"
 version = "0.10.0"
 dependencies = [

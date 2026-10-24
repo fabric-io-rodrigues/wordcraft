@@ -129,7 +129,7 @@ fn cmd_layers() -> Result<(), String> {
 }
 
 /// Workspace packages that must build for wasm32: all L0–L5 crates plus
-/// the egui shell.
+/// the egui shell and the headless converter (`wordcraft-wasm`).
 fn wasm_set() -> Result<Vec<String>, String> {
     let crates = layers::from_metadata(&metadata()?)?;
     Ok(crates
@@ -137,6 +137,7 @@ fn wasm_set() -> Result<Vec<String>, String> {
         .filter(|c| match layers::classify(&c.name) {
             Some(layers::Class::Layer(l)) => l <= 5 || layers::short_name(&c.name) == "ui-egui",
             Some(layers::Class::Standalone) => true,
+            Some(layers::Class::Exempt) => layers::short_name(&c.name) == "wasm",
             _ => false,
         })
         .map(|c| c.name)
