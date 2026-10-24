@@ -152,6 +152,9 @@ wordcraft-cli run --script job.json                 # the same from a file: comm
 ```
 
 Web: `cd apps/wordcraft-web && trunk serve`, then open <http://127.0.0.1:8771/?sample>.
+A page can hand the web app a file (`?file=<url>`, `window.wordcraft.open`, `postMessage`) and get
+the document back as a PDF's bytes, or convert without a window through `wordcraft-wasm`: see
+[docs/web-embedding.md](docs/web-embedding.md).
 
 ## For agents: CLI and MCP
 
@@ -200,7 +203,7 @@ covers every target starting with it (`wordcraft*=debug`). The logger is
 | L4 | `wordcraft-engine` | session, undo, 422 commands, document feature catalog |
 | L5 | `wordcraft-mcp` | MCP server |
 | L6 | `wordcraft-ui-egui` | the word processor front end (swappable) |
-| apps | `wordcraft`, `wordcraft-cli`, `wordcraft-web` | desktop, command line, browser |
+| apps | `wordcraft`, `wordcraft-cli`, `wordcraft-web`, `wordcraft-wasm` | desktop, command line, browser, headless converter for JavaScript |
 
 `cargo xtask ci` runs formatting, clippy, ~800 tests, the asset-attribution check, the layering
 check and the wasm build. Contributor and agent instructions: [AGENTS.md](AGENTS.md).
