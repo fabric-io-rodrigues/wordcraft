@@ -1,6 +1,6 @@
 # Embedding WordCraft in a web page
 
-> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** major (new page: `?file=`, `window.wordcraft`, `postMessage` and the headless `wordcraft-wasm` converter)
+> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** minor (parent origins listed by the deployment, ordered opens and exports, streamed `?file=` cap; previously major: new page: `?file=`, `window.wordcraft`, `postMessage` and the headless `wordcraft-wasm` converter)
 
 A page can use WordCraft in two ways:
 
@@ -30,20 +30,23 @@ https://example.org/wordcraft/?file=https%3A%2F%2Fcdn.example.org%2Fa%3Fid%3D7&n
 - `name` gives the file name, and its extension gives the format, when the URL path doesn't end in
   one. The extension must be a document format the editor opens: `docx docm dotx dotm doc dot odt
   rtf txt md html htm tex json xml`.
-- Files over 200 MB are refused, by `Content-Length` before reading when the server sends one.
+- Files over 200 MB are refused: by `Content-Length` before reading when the server sends one,
+  and otherwise as soon as the download passes 200 MB (it is read in chunks and cancelled there).
+- The file opens before any `window.wordcraft` or message request is answered, so an export asked
+  for meanwhile waits for it instead of getting the blank document.
 - When the file can't be opened, the reason is shown on the status line and the editor opens a new
   blank document, never an error page.
 
 ### From the same page: `window.wordcraft`
 
 Once the editor has started, `window.wordcraft` is there and `window` gets a `wordcraft-ready`
-event:
+event. Only scripts of the editor's own origin can reach it.
 
 ```js
 addEventListener("wordcraft-ready", async () => {
   const bytes = new Uint8Array(await (await fetch("report.docx")).arrayBuffer());
-  await wordcraft.open("report.docx", bytes);       // opens as a dropped file does
-  const pdf = await wordcraft.exportPdf();           // Uint8Array, "%PDF-…"
+  await wordcraft.open("report.docx", bytes);       // resolves once it has opened: {name}
+  const pdf = await wordcraft.exportPdf();           // Uint8Array, "%PDF-…", of report.docx
   const docx = await wordcraft.export("docx");       // any format in formats().export
   const marked = await wordcraft.exportPdf({ markup: true }); // Print Markup: comments and changes
 });
@@ -51,29 +54,39 @@ addEventListener("wordcraft-ready", async () => {
 
 | Member | What it does |
 |---|---|
-| `open(name, Uint8Array \| ArrayBuffer)` | Queues the file the way a drop does: a document opens (asking Save / Don't Save / Cancel first if there are unsaved changes), and a picture is inserted. The promise resolves once the file is accepted and rejects for a name WordCraft doesn't open or a file over 200 MB. |
+| `open(name, Uint8Array \| ArrayBuffer, {discardChanges?})` | Opens the document. The promise resolves with `{name}` once it **has** opened, and rejects for a name WordCraft doesn't open, a file over 200 MB, a file that isn't the document its name says, or unsaved changes in the open document (unless `discardChanges: true`: the user is never asked, so the outcome is known). |
 | `exportPdf({markup?})` | `Promise<Uint8Array>`: the open document as a PDF, made with the same options as File › Export › PDF. `markup` overrides File › Print › Print Markup. |
 | `export(format, {markup?})` | The same in any format WordCraft saves: `docx docm dotx dotm pdf txt md html rtf odt tex png json xml` (`png` is the first page). |
-| `formats()` | `{open, pictures, export}`: the extension lists. |
+| `formats()` | `{open, export}`: the extension lists. |
 | `version` | The WordCraft version. |
 
-An export runs on the editor's next frame, after any file opened before it. It rejects when no
-document is open (File › Home) or when the format isn't one WordCraft saves.
+Opens and exports are answered in the order they were asked, on the editor's next frames: an
+export has the document every open before it left, and an open that failed leaves the document
+it found. An export rejects when no document is open (File › Home) or when the format isn't one
+WordCraft saves.
 
 ### From a parent page: `postMessage`
 
-In an `<iframe>`, the editor answers messages from its **parent window only**:
+The editor answers messages only from parent pages **the deployment lists** in its `index.html`.
+The page that frames the editor chooses the editor's URL, so a URL parameter can't decide whom to
+trust; whoever serves the editor does:
 
 ```html
-<iframe id="wc" src="https://example.org/wordcraft/?origin=https://app.example.com"></iframe>
+<!-- in the deployed index.html (shipped empty: no parent is answered) -->
+<meta name="wordcraft-embed-origins" content="https://app.example.com https://staging.example.com">
+```
+
+```html
+<!-- on https://app.example.com -->
+<iframe id="wc" src="https://example.org/wordcraft/"></iframe>
 <script>
   const wc = document.getElementById("wc").contentWindow;
   const target = "https://example.org";
   addEventListener("message", (e) => {
     if (e.origin !== target) return;
     if (e.data.type === "wordcraft:ready") {
-      wc.postMessage({ type: "wordcraft:open", name: "report.docx", data: bytes }, target);
-      wc.postMessage({ type: "wordcraft:export", id: 1, format: "pdf" }, target);
+      wc.postMessage({ type: "wordcraft:open", id: 1, name: "report.docx", data: bytes }, target);
+      wc.postMessage({ type: "wordcraft:export", id: 2, format: "pdf" }, target);
     }
     if (e.data.type === "wordcraft:exported") save(new Blob([e.data.data], { type: "application/pdf" }));
     if (e.data.type === "wordcraft:error") console.error(e.data.id, e.data.message);
@@ -83,21 +96,25 @@ In an `<iframe>`, the editor answers messages from its **parent window only**:
 
 | Message | Direction | Fields |
 |---|---|---|
-| `wordcraft:ready` | editor → parent | sent once the editor listens |
-| `wordcraft:open` | parent → editor | `name`, `data` (`Uint8Array` or `ArrayBuffer`) |
+| `wordcraft:ready` | editor → parent | sent once the editor listens, to the listed origins only |
+| `wordcraft:open` | parent → editor | `id?`, `name`, `data` (`Uint8Array` or `ArrayBuffer`), `discardChanges?` |
+| `wordcraft:opened` | editor → parent | `id`, `name`: the document has opened |
 | `wordcraft:export` | parent → editor | `id` (any value, echoed back), `format` (default `"pdf"`), `markup?` |
 | `wordcraft:exported` | editor → parent | `id`, `format`, `data` (`ArrayBuffer`, transferred) |
 | `wordcraft:error` | editor → parent | `id`, `message` |
 
-Who gets answered:
+Messages are answered in the order they arrive, as `window.wordcraft` calls are. Who gets answered:
 
-- Only messages whose `source` is the parent window are read. Other frames, popups and the page
-  itself are ignored, and so is the editor when it isn't in a frame.
-- With `?origin=<origin>` in the editor's address, only that origin's messages are read, and
-  `wordcraft:ready` goes only to it. **Set it whenever the editor can be framed by pages you don't
-  control.** Otherwise any page that frames the editor can ask for the document the user is
-  editing in that frame.
+- Nobody, unless `wordcraft-embed-origins` lists at least one origin. Only `http`/`https` origins
+  count; `*` and `null` are ignored.
+- Only messages whose `source` is the parent window and whose origin is listed are read. Other
+  frames, popups and the page itself are ignored, and so is the editor when it isn't in a frame.
 - Answers go to the origin of the message they answer, never to `"*"`.
+- A parent with an opaque origin (a sandboxed frame without `allow-same-origin`, a page opened from
+  a `file:` URL) can't be listed: `postMessage` can't name such an origin, so no answer could reach
+  it.
+- To keep other sites from framing the editor at all, serve it with
+  `Content-Security-Policy: frame-ancestors <the listed origins>`.
 
 ## The converter: `wordcraft-wasm`
 
@@ -137,11 +154,14 @@ global object (`js_sys::Reflect::set`), which needs none.
 
 - `crates/engine/src/tests.rs`: `convert_bytes_*` (DOCX → PDF, Markdown → ODT, hostile input).
 - `apps/wordcraft-web/src/host_protocol.rs`: URL parameters, allowed addresses, names, sizes,
-  formats and origins (`cargo test -p wordcraft-web`).
+  formats and the listed origins (`cargo test -p wordcraft-web`).
 - `apps/wordcraft-wasm/src/lib.rs`: conversion and font errors (`cargo test -p wordcraft-wasm`).
 - `cargo xtask wasm` checks that `wordcraft-wasm` builds for `wasm32-unknown-unknown`.
 
 ## Revision history
 
+- 2026-10-24: parent origins come from the deployment (`wordcraft-embed-origins` in `index.html`)
+  instead of `?origin=`; opens resolve once the document has opened and are answered in order with
+  exports; `?file=` downloads stop at 200 MB.
 - 2026-10-24: new page. `?file=`, `window.wordcraft`, `postMessage` and the `wordcraft-wasm`
   converter.

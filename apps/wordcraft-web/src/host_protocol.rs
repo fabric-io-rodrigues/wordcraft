@@ -1,6 +1,6 @@
 //! The page hosting the browser app: which files it may hand in (`?file=`,
-//! `window.wordcraft.open`, `postMessage`), which formats it may ask back, and whose messages are
-//! answered. Everything here is plain Rust, shared with native tests; the browser glue is
+//! `window.wordcraft.open`, `postMessage`), which formats it may ask back, and which parent pages
+//! are answered (the origins the deployment lists in `index.html`, never ones the URL names). Everything here is plain Rust, shared with native tests; the browser glue is
 //! `web/host.rs`.
 
 /// Documents the browser app opens (the Open picker's filter).
@@ -17,10 +17,15 @@ const MAX_NAME_CHARS: usize = 255;
 pub(crate) const MSG_OPEN: &str = "wordcraft:open";
 pub(crate) const MSG_EXPORT: &str = "wordcraft:export";
 pub(crate) const MSG_READY: &str = "wordcraft:ready";
+pub(crate) const MSG_OPENED: &str = "wordcraft:opened";
 pub(crate) const MSG_EXPORTED: &str = "wordcraft:exported";
 pub(crate) const MSG_ERROR: &str = "wordcraft:error";
 /// The event `window` gets once `window.wordcraft` is there.
 pub(crate) const READY_EVENT: &str = "wordcraft-ready";
+/// The `<meta name=…>` in the deployed `index.html` whose `content` lists the parent origins whose
+/// messages are answered. Without it (or with it empty) the app answers no messages: the page that
+/// frames the app picks its URL, so only the deployment can say whom to trust.
+pub(crate) const EMBED_ORIGINS_META: &str = "wordcraft-embed-origins";
 
 /// What a host message asks for, by its `type`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +35,7 @@ pub(crate) enum Kind {
 }
 
 impl Kind {
+    /// The request a message's `type` names; our own replies and anything else name none.
     pub(crate) fn parse(ty: &str) -> Option<Kind> {
         match ty {
             MSG_OPEN => Some(Kind::Open),
@@ -55,7 +61,12 @@ fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while let Some(&c) = b.get(i) {
-        let hex = b.get(i + 1..i + 3).and_then(|h| std::str::from_utf8(h).ok()).and_then(|h| u8::from_str_radix(h, 16).ok());
+        // Two hex digits exactly: `from_str_radix` alone would take `%+A` (a sign) as 0x0A.
+        let hex = b
+            .get(i + 1..i + 3)
+            .filter(|h| h.iter().all(u8::is_ascii_hexdigit))
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
         match (c, hex) {
             (b'%', Some(v)) => {
                 out.push(v);
@@ -123,14 +134,24 @@ pub(crate) fn export_format(asked: Option<&str>) -> Result<String, String> {
     }
 }
 
-/// Whether a message from `origin` is answered: any origin of the parent page when the URL names
-/// none, else exactly the one `?origin=` names (`https://host.example`, a trailing `/` ignored).
-/// An opaque origin (`"null"`) never matches a named one.
-pub(crate) fn origin_allowed(expected: Option<&str>, origin: &str) -> bool {
-    match expected.map(|e| e.trim().trim_end_matches('/')) {
-        None | Some("") => true,
-        Some(e) => origin != "null" && e.eq_ignore_ascii_case(origin.trim_end_matches('/')),
-    }
+/// The origins a deployment lists in its `wordcraft-embed-origins` meta tag (separated by spaces
+/// or commas): `http`/`https` origins only, without a path and with any trailing `/` dropped.
+/// `*`, `null` (an opaque origin, which no reply can reach) and anything else are left out.
+pub(crate) fn embed_origins(content: &str) -> Vec<String> {
+    content
+        .split([' ', ',', '\n', '\t'])
+        .map(|o| o.trim().trim_end_matches('/'))
+        .filter(|o| {
+            let Some((scheme, rest)) = o.split_once("://") else { return false };
+            matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") && !rest.is_empty() && !rest.contains(['/', '?', '#', '@', '*'])
+        })
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+/// Whether a message from `origin` is answered: only when the deployment lists it.
+pub(crate) fn origin_listed(listed: &[String], origin: &str) -> bool {
+    listed.iter().any(|o| o.eq_ignore_ascii_case(origin))
 }
 
 #[cfg(test)]
@@ -149,6 +170,8 @@ mod tests {
         assert_eq!(query_param("file=a%2", "file").as_deref(), Some("a%2"), "a cut escape stays");
         assert_eq!(query_param("file=%ZZ%", "file").as_deref(), Some("%ZZ%"));
         assert_eq!(query_param("file=%FF", "file").as_deref(), Some("\u{FFFD}"));
+        assert_eq!(query_param("file=%+A", "file").as_deref(), Some("% A"), "a sign is not a hex digit");
+        assert_eq!(query_param("file=%-1%2", "file").as_deref(), Some("%-1%2"));
         assert_eq!(query_param("", "file"), None);
     }
 
@@ -202,21 +225,28 @@ mod tests {
     }
 
     #[test]
-    fn origins() {
-        assert!(origin_allowed(None, "https://any.example"));
-        assert!(origin_allowed(Some(""), "null"));
-        assert!(origin_allowed(Some("https://host.example/"), "https://host.example"));
-        assert!(origin_allowed(Some("https://Host.example"), "https://host.example"));
-        assert!(!origin_allowed(Some("https://host.example"), "https://evil.example"));
-        assert!(!origin_allowed(Some("https://host.example"), "https://host.example.evil"));
-        assert!(!origin_allowed(Some("null"), "null"), "an opaque origin is nobody's");
+    fn deployments_list_the_origins() {
+        let listed = embed_origins(" https://App.example/ ,http://localhost:8080\nhttps://b.example ");
+        assert_eq!(listed, ["https://app.example", "http://localhost:8080", "https://b.example"]);
+        for bad in ["*", "null", "https://*.example", "https://h.example/path", "ftp://h", "javascript:x", "https://", "h.example", "https://u@h"] {
+            assert!(embed_origins(bad).is_empty(), "{bad:?}");
+        }
+        assert!(embed_origins("").is_empty(), "no meta content: no messages answered");
+        assert!(origin_listed(&listed, "https://app.example"));
+        assert!(origin_listed(&listed, "HTTPS://APP.EXAMPLE"));
+        assert!(!origin_listed(&listed, "https://app.example.evil"));
+        assert!(!origin_listed(&listed, "null"));
+        assert!(!origin_listed(&[], "https://app.example"));
+        // The shipped page carries the tag, empty: a deployment fills it in.
+        let page = include_str!("../index.html");
+        assert!(page.contains(&format!("<meta name=\"{EMBED_ORIGINS_META}\" content=\"\">")));
     }
 
     #[test]
     fn message_kinds() {
         assert_eq!(Kind::parse(MSG_OPEN), Some(Kind::Open));
         assert_eq!(Kind::parse(MSG_EXPORT), Some(Kind::Export));
-        for reply in [MSG_READY, MSG_EXPORTED, MSG_ERROR, READY_EVENT] {
+        for reply in [MSG_READY, MSG_OPENED, MSG_EXPORTED, MSG_ERROR, READY_EVENT] {
             assert_eq!(Kind::parse(reply), None, "{reply}: our own replies are not requests");
         }
         assert_eq!(Kind::parse("open"), None);

@@ -4,6 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
   <title>WordCraft</title>
+  <!-- The parent pages (origins, separated by spaces) whose postMessage requests are answered when
+       this page is framed, e.g. content="https://app.example.com". Empty: none. See docs/web-embedding.md. -->
+  <meta name="wordcraft-embed-origins" content="">
   <link data-trunk rel="icon" href="../../assets/app-icon/wordcraft.ico" />
   <link data-trunk rel="rust" data-bin="wordcraft-web" data-wasm-opt="z" data-weak-refs />
   <style>

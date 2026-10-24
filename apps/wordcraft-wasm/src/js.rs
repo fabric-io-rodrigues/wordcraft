@@ -5,20 +5,25 @@ use wasm_bindgen::JsCast as _;
 use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
 
+/// What a function JavaScript calls returns: a value, or an `Error` it throws.
 type JsResult = Result<JsValue, JsValue>;
 
+/// Set `key` on a JS object.
 fn set(obj: &js_sys::Object, key: &str, value: &JsValue) {
     let _ = js_sys::Reflect::set(obj, &JsValue::from_str(key), value);
 }
 
+/// `key` of a JS value (`undefined` when it isn't an object).
 fn get(obj: &JsValue, key: &str) -> JsValue {
     if obj.is_object() { js_sys::Reflect::get(obj, &JsValue::from_str(key)).unwrap_or(JsValue::UNDEFINED) } else { JsValue::UNDEFINED }
 }
 
+/// A JS `Error` with `msg`, for JavaScript to catch.
 fn error(msg: impl AsRef<str>) -> JsValue {
     js_sys::Error::new(msg.as_ref()).into()
 }
 
+/// The file name JavaScript passed: its extension gives the format.
 fn name_of(name: &JsValue) -> Result<String, JsValue> {
     name.as_string().ok_or_else(|| error("the file needs a name, such as \"report.docx\": its extension gives the format"))
 }
@@ -39,18 +44,22 @@ fn bytes_of(data: &JsValue) -> Result<Vec<u8>, JsValue> {
     Ok(array.to_vec())
 }
 
+/// `{markup?, password?}` as [`wordcraft_wasm::Options`]; anything else is the defaults.
 fn options_of(opts: &JsValue) -> wordcraft_wasm::Options {
     wordcraft_wasm::Options { markup: get(opts, "markup").as_bool().unwrap_or(false), password: get(opts, "password").as_string() }
 }
 
+/// A conversion's bytes as a `Uint8Array`, or its error thrown.
 fn bytes_out(r: Result<Vec<u8>, String>) -> JsResult {
     r.map(|bytes| js_sys::Uint8Array::from(bytes.as_slice()).into()).map_err(error)
 }
 
+/// A JS array of strings.
 fn list(items: &[&str]) -> JsValue {
     items.iter().map(|e| JsValue::from_str(e)).collect::<js_sys::Array>().into()
 }
 
+/// Put `globalThis.wordcraft` in place: `convert`, `toPdf`, `addFont`, `formats` and `version`.
 pub(crate) fn install() {
     let api = js_sys::Object::new();
     let convert =

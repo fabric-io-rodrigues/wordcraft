@@ -15,11 +15,13 @@
 #[cfg(target_arch = "wasm32")]
 mod js;
 
+/// Runs when the module is initialised: the converter's functions go on `globalThis`.
 #[cfg(target_arch = "wasm32")]
 fn main() {
     js::install();
 }
 
+/// Natively there is nothing to run: point at the wasm build and the CLI.
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
     eprintln!(

@@ -59,8 +59,10 @@ pub fn start() {
                     let messages = Rc::new(RefCell::new(Vec::new()));
                     let sample = query().contains("sample");
                     let doc = if sample { wordcraft_engine::sample::sample_document() } else { wordcraft_engine::blank_document(&region) };
-                    // A file the address names (`?file=`) opens once fetched.
-                    let from_url = host::open_from_url(&query(), inbox.clone(), cc.egui_ctx.clone(), messages.clone());
+                    // The hosting page's requests (`?file=`, `window.wordcraft`, `postMessage`); a file
+                    // the address names opens once fetched, before any other request.
+                    let host = host::Host::default();
+                    let from_url = host::open_from_url(&query(), &host, cc.egui_ctx.clone(), messages.clone());
                     let mut session = Session::new(doc);
                     session.system_region = region;
                     let mut app = WordApp::new(session, services(inbox.clone(), cc.egui_ctx.clone(), dirty, saves.clone(), messages.clone()));
@@ -81,9 +83,7 @@ pub fn start() {
                     if !sample && !from_url {
                         app.start_screen();
                     }
-                    // The hosting page's API (`window.wordcraft`, `postMessage`).
-                    let host = host::Host::default();
-                    if let Err(e) = host::install(&host, inbox.clone(), cc.egui_ctx.clone()) {
+                    if let Err(e) = host::install(&host, cc.egui_ctx.clone()) {
                         log::error!("the host page API is unavailable: {e}");
                     }
                     Ok(Box::new(WebShell { app, inbox, messages, prefs, host }))
@@ -144,8 +144,8 @@ impl eframe::App for WebShell {
             self.app.status(msg);
         }
         self.app.logic(ctx);
-        // After the app's frame, so a file the host handed in first has opened.
-        self.host.drain(&self.app);
+        // After the app's frame, so the requests see the document as the user left it.
+        self.host.drain(&mut self.app);
         // Store changed preferences straight away: a reload or closed tab runs no exit code (#2132).
         if let Some(json) = self.prefs.changed(&self.app) {
             match local_storage() {
