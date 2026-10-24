@@ -1,4 +1,4 @@
-//! The page hosting the browser app (#web-embed): which files it may hand in (`?file=`,
+//! The page hosting the browser app: which files it may hand in (`?file=`,
 //! `window.wordcraft.open`, `postMessage`), which formats it may ask back, and whose messages are
 //! answered. Everything here is plain Rust, shared with native tests; the browser glue is
 //! `web/host.rs`.

@@ -59,7 +59,7 @@ pub fn start() {
                     let messages = Rc::new(RefCell::new(Vec::new()));
                     let sample = query().contains("sample");
                     let doc = if sample { wordcraft_engine::sample::sample_document() } else { wordcraft_engine::blank_document(&region) };
-                    // A file the address names (`?file=`, #web-embed) opens once fetched.
+                    // A file the address names (`?file=`) opens once fetched.
                     let from_url = host::open_from_url(&query(), inbox.clone(), cc.egui_ctx.clone(), messages.clone());
                     let mut session = Session::new(doc);
                     session.system_region = region;
@@ -81,7 +81,7 @@ pub fn start() {
                     if !sample && !from_url {
                         app.start_screen();
                     }
-                    // The hosting page's API (`window.wordcraft`, `postMessage`; #web-embed).
+                    // The hosting page's API (`window.wordcraft`, `postMessage`).
                     let host = host::Host::default();
                     if let Err(e) = host::install(&host, inbox.clone(), cc.egui_ctx.clone()) {
                         log::error!("the host page API is unavailable: {e}");
@@ -144,7 +144,7 @@ impl eframe::App for WebShell {
             self.app.status(msg);
         }
         self.app.logic(ctx);
-        // After the app's frame, so a file the host handed in first has opened (#web-embed).
+        // After the app's frame, so a file the host handed in first has opened.
         self.host.drain(&self.app);
         // Store changed preferences straight away: a reload or closed tab runs no exit code (#2132).
         if let Some(json) = self.prefs.changed(&self.app) {

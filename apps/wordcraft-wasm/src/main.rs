@@ -1,4 +1,4 @@
-//! WordCraft's headless converter for JavaScript (#web-embed). In the browser (a page or a Web
+//! WordCraft's headless converter for JavaScript. In the browser (a page or a Web
 //! Worker) `main` puts `globalThis.wordcraft` in place:
 //!
 //! - `convert(name, bytes, to, {markup?, password?})` → `Uint8Array` (throws an `Error`),

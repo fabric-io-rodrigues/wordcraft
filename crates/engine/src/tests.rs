@@ -71,7 +71,7 @@ fn txt_open_decodes_windows_1252_and_unmarked_utf16() {
 
 #[test]
 fn convert_bytes_writes_a_pdf_from_a_docx() {
-    // #web-embed: the browser host and the headless converter hand bytes in and get bytes back.
+    // The browser host and the headless converter hand bytes in and get bytes back.
     let docx = crate::io::save_bytes("in.docx", &crate::sample::sample_document()).unwrap();
     let opts = crate::io::ConvertOptions::default();
     let pdf = crate::io::convert_bytes("Report.DOCX", &docx, "pdf", &opts).unwrap();

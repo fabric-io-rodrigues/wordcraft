@@ -409,7 +409,7 @@ pub fn can_convert_to(to: &str) -> bool {
 
 /// Open `bytes` (the format comes from `name`'s extension, as [`open_bytes`] reads it) and write
 /// the document as `to` (`"pdf"`, `"docx"`, `"odt"`… — one of [`SAVE_EXTS`]): `wordcraft-cli
-/// convert` without files, for hosts that hold the bytes (the browser, #web-embed).
+/// convert` without files, for hosts that hold the bytes (the browser).
 pub fn convert_bytes(name: &str, bytes: &[u8], to: &str, opts: &ConvertOptions) -> Result<Vec<u8>, String> {
     if bytes.len() > MAX_CONVERT_BYTES {
         return Err(format!("{name}: larger than {} MB", MAX_CONVERT_BYTES >> 20));

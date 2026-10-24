@@ -1,4 +1,4 @@
-//! WordCraft's converter without a window (#web-embed): a document's bytes in, a PDF (or any
+//! WordCraft's converter without a window: a document's bytes in, a PDF (or any
 //! format WordCraft saves) out, as `wordcraft-cli convert` does with files. `main.rs` puts these
 //! functions on JavaScript's `globalThis.wordcraft` (a page or a Web Worker); here they are plain
 //! Rust, tested natively. See `docs/web-embedding.md`.

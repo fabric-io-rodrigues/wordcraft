@@ -1,4 +1,4 @@
-//! The page hosting the app (#web-embed): a file handed in with `?file=<url>`,
+//! The page hosting the app: a file handed in with `?file=<url>`,
 //! `window.wordcraft.open` or a `wordcraft:open` message opens as a dropped file does (through the
 //! inbox), and the document goes back as bytes (`window.wordcraft.exportPdf`/`export`, or a
 //! `wordcraft:export` message). What is accepted is decided in `host_protocol`; see
@@ -241,7 +241,7 @@ fn parent_of(window: &web_sys::Window) -> Option<web_sys::Window> {
     window.parent().ok().flatten().filter(|p| !js_sys::Object::is(p, window))
 }
 
-/// `postMessage` from the parent page (#web-embed): only messages whose source is the parent
+/// `postMessage` from the parent page: only messages whose source is the parent
 /// window, from the origin `?origin=` names when it names one, are answered, and answers go back
 /// to that origin alone.
 fn listen_for_messages(window: &web_sys::Window, host: Host, inbox: Inbox, ctx: egui::Context) -> Result<(), String> {
