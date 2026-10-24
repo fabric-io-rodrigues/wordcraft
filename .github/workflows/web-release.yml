@@ -1,0 +1,120 @@
+# Builds the browser app (`apps/wordcraft-web`, with trunk) and, when the checked-out code has it,
+# the headless converter (`apps/wordcraft-wasm`, with wasm-bindgen), and publishes both zips on a
+# GitHub release. Fork-only: upstream ships the web zip through release.yml (craft-common-actions),
+# which needs signing secrets a fork doesn't have.
+#
+# Run it from Actions › Web release › Run workflow (pick the branch to build in `ref`), or push a
+# `web-v*` tag. Every run also keeps the zips as a workflow artifact.
+name: Web release
+
+on:
+  push:
+    tags: ["web-v*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or commit to build (empty: the branch the workflow runs on)"
+        type: string
+        default: ""
+      tag:
+        description: "Release tag to create or update (empty: web-v<version>-<short commit>)"
+        type: string
+        default: ""
+      publish:
+        description: "Publish a GitHub release (off: only the workflow artifact)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: web-release-${{ github.ref }}-${{ inputs.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Rust toolchain with the wasm32 target
+        run: |
+          rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+          rustup default stable
+
+      - name: Versions
+        id: v
+        run: |
+          version=$(awk '/^\[/{p=($0=="[workspace.package]");next} p&&$1=="version"{gsub(/[" ]/,"",$3);print $3;exit}' Cargo.toml)
+          bindgen=$(awk '/^name = "wasm-bindgen"$/{getline;gsub(/[" ]/,"",$3);print $3;exit}' Cargo.lock)
+          sha=$(git rev-parse --short=8 HEAD)
+          tag="${{ inputs.tag }}"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then tag="$GITHUB_REF_NAME"; fi
+          if [[ -z "$tag" ]]; then tag="web-v$version-$sha"; fi
+          converter=false
+          if [[ -f apps/wordcraft-wasm/Cargo.toml ]]; then converter=true; fi
+          {
+            echo "version=$version"; echo "bindgen=$bindgen"; echo "sha=$sha"
+            echo "tag=$tag"; echo "converter=$converter"
+          } >> "$GITHUB_OUTPUT"
+          echo "WordCraft $version at $sha, wasm-bindgen $bindgen, tag $tag, converter $converter"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm32
+
+      - name: Install trunk and wasm-bindgen (the Cargo.lock version)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: trunk,wasm-bindgen@${{ steps.v.outputs.bindgen }}
+
+      - name: Browser app (wordcraft-web-<version>.zip)
+        run: packaging/web/package.sh
+
+      - name: Headless converter (wordcraft-wasm-<version>.zip)
+        if: steps.v.outputs.converter == 'true'
+        run: |
+          set -euo pipefail
+          cargo build --release --target wasm32-unknown-unknown -p wordcraft-wasm
+          name="wordcraft-wasm-${{ steps.v.outputs.version }}"
+          out="target/wasm-package/$name"
+          rm -rf "target/wasm-package" && mkdir -p "$out"
+          wasm=target/wasm32-unknown-unknown/release/wordcraft-wasm.wasm
+          # `web`: an ES module for pages (`import init from "./web/wordcraft-wasm.js"`);
+          # `no-modules`: a classic script for Web Workers (`importScripts`).
+          wasm-bindgen --target web --out-dir "$out/web" "$wasm"
+          wasm-bindgen --target no-modules --out-dir "$out/no-modules" "$wasm"
+          cp docs/web-embedding.md "$out/README.md"
+          cp LICENSE-MIT LICENSE-APACHE "$out/"
+          (cd target/wasm-package && zip -qr9 "$GITHUB_WORKSPACE/dist/release/$name.zip" "$name")
+          ls -lh dist/release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wordcraft-web-${{ steps.v.outputs.version }}-${{ steps.v.outputs.sha }}
+          path: dist/release/*.zip
+          if-no-files-found: error
+
+      - name: GitHub release
+        if: github.event_name == 'push' || inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.v.outputs.tag }}
+        run: |
+          set -euo pipefail
+          notes="WordCraft ${{ steps.v.outputs.version }} for the web, built from ${{ steps.v.outputs.sha }}.
+
+          - \`wordcraft-web-*.zip\`: the editor as a static site (see HOSTING.md inside).
+          - \`wordcraft-wasm-*.zip\` (when built): the headless converter, \`web/\` for pages and \`no-modules/\` for Web Workers (see README.md inside)."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/release/*.zip --clobber
+          else
+            gh release create "$TAG" dist/release/*.zip --target "$(git rev-parse HEAD)" \
+              --title "WordCraft web ${{ steps.v.outputs.version }} (${{ steps.v.outputs.sha }})" --notes "$notes" --prerelease
+          fi
