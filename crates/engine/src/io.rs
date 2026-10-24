@@ -387,6 +387,42 @@ pub fn save_bytes_with(name: &str, doc: &Document, password: Option<&str>, opts:
     }
 }
 
+/// Largest file [`convert_bytes`] reads (as `insert.picture` allows for a picture).
+pub const MAX_CONVERT_BYTES: usize = 200 << 20;
+
+/// How [`convert_bytes`] reads and writes.
+#[derive(Clone, Debug, Default)]
+pub struct ConvertOptions<'a> {
+    /// Print Markup on the copy: tracked changes marked up and the comments shown.
+    pub markup: bool,
+    /// The password of a password-protected Word document.
+    pub password: Option<&'a str>,
+    /// The region whose paper a file that gives no page size (text, Markdown, HTML) opens on.
+    pub region: wordcraft_geom::Region,
+}
+
+/// Is `to` (an extension, any case, with or without its dot) a format [`convert_bytes`] writes?
+pub fn can_convert_to(to: &str) -> bool {
+    let to = to.trim_start_matches('.').to_ascii_lowercase();
+    SAVE_EXTS.contains(&to.as_str())
+}
+
+/// Open `bytes` (the format comes from `name`'s extension, as [`open_bytes`] reads it) and write
+/// the document as `to` (`"pdf"`, `"docx"`, `"odt"`… — one of [`SAVE_EXTS`]): `wordcraft-cli
+/// convert` without files, for hosts that hold the bytes (the browser, #web-embed).
+pub fn convert_bytes(name: &str, bytes: &[u8], to: &str, opts: &ConvertOptions) -> Result<Vec<u8>, String> {
+    if bytes.len() > MAX_CONVERT_BYTES {
+        return Err(format!("{name}: larger than {} MB", MAX_CONVERT_BYTES >> 20));
+    }
+    if !can_convert_to(to) {
+        return Err(format!("can't convert to `{to}`: the formats are {}", SAVE_EXTS.join(", ")));
+    }
+    let (doc, _) = open_bytes_in(name, bytes, opts.password, &opts.region)?;
+    let to = to.trim_start_matches('.').to_ascii_lowercase();
+    let export = ExportOptions { markup: opts.markup, comments: opts.markup, ..Default::default() };
+    save_bytes_opts(&format!("converted.{to}"), &doc, &export)
+}
+
 pub fn open_path(path: &std::path::Path) -> Result<Document, String> {
     open_path_with(path, None).map(|(doc, _)| doc)
 }

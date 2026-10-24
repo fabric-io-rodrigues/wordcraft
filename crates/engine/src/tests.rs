@@ -70,6 +70,40 @@ fn txt_open_decodes_windows_1252_and_unmarked_utf16() {
 }
 
 #[test]
+fn convert_bytes_writes_a_pdf_from_a_docx() {
+    // #web-embed: the browser host and the headless converter hand bytes in and get bytes back.
+    let docx = crate::io::save_bytes("in.docx", &crate::sample::sample_document()).unwrap();
+    let opts = crate::io::ConvertOptions::default();
+    let pdf = crate::io::convert_bytes("Report.DOCX", &docx, "pdf", &opts).unwrap();
+    assert!(pdf.starts_with(b"%PDF-"), "a PDF");
+    assert_eq!(crate::io::convert_bytes("in.docx", &docx, ".PDF", &opts).unwrap().get(..5), Some(&b"%PDF-"[..]));
+    let odt = crate::io::convert_bytes("in.md", b"# Title\n\nBody\n", "odt", &opts).unwrap();
+    assert!(odt.starts_with(b"PK"), "an ODF package");
+    let back = crate::io::convert_bytes("in.md", b"alpha\n", "txt", &opts).unwrap();
+    assert_eq!(back, b"alpha");
+}
+
+#[test]
+fn convert_bytes_rejects_hostile_input_without_panicking() {
+    let opts = crate::io::ConvertOptions::default();
+    let junk: Vec<u8> = (0..4096u32).map(|i| (i.wrapping_mul(2654435761) >> 24) as u8).collect();
+    // Junk under any name returns (an error or a document), never panics.
+    for name in ["x.docx", "x.doc", "x.odt", "x.rtf", "x.xml", "x.json", "x.exe", "noext", "", "../../etc/passwd", "x."] {
+        let _ = crate::io::convert_bytes(name, &junk, "pdf", &opts);
+        let _ = crate::io::convert_bytes(name, b"", "pdf", &opts);
+    }
+    for name in ["x.docx", "x.doc", "x.json", "x.exe"] {
+        assert!(crate::io::convert_bytes(name, &junk, "pdf", &opts).is_err(), "{name}: junk is not a document");
+    }
+    for to in ["", "exe", "pdf/../x", "p\u{0}df", "docx.pdf", "png "] {
+        assert!(!crate::io::can_convert_to(to), "{to:?}");
+        assert!(crate::io::convert_bytes("in.txt", b"a", to, &opts).is_err(), "{to:?}");
+    }
+    let big = vec![b'a'; crate::io::MAX_CONVERT_BYTES + 1];
+    assert!(crate::io::convert_bytes("big.txt", &big, "pdf", &opts).unwrap_err().contains("larger than"));
+}
+
+#[test]
 fn txt_save_writes_list_labels() {
     // #434: list paragraphs keep their bullet or number and a tab in plain text.
     let doc = crate::io::open_bytes("l.md", b"- alpha\n- beta\n\n1. first\n2. second\n").unwrap();
