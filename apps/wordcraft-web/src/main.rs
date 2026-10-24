@@ -7,9 +7,16 @@
 //! Differences from the desktop app: no TCP control channel; Open and Insert › Pictures use the
 //! browser file picker (bytes arrive through `Services::inbox`); Save and Export download.
 //! Preferences (theme, interface size, editing options…) are kept in `localStorage` (`prefs`).
-//! URL flags: `?webgl` forces WebGL2; `?sample` opens the sample document.
+//! URL flags: `?webgl` forces WebGL2; `?sample` opens the sample document; `?file=<url>` (with an
+//! optional `&name=`) fetches a document and opens it.
+//!
+//! A page hosting the app hands it files and gets the document back as bytes (a PDF, say) through
+//! `window.wordcraft` or, from a parent page, `postMessage` (`host_protocol`, `web/host.rs`;
+//! `docs/web-embedding.md`).
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+#[cfg(any(target_arch = "wasm32", test))]
+mod host_protocol;
 #[cfg(any(target_arch = "wasm32", test))]
 mod prefs;
 #[cfg(any(target_arch = "wasm32", test))]

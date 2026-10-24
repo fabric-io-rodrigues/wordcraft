@@ -9,10 +9,10 @@ use wordcraft_engine::Session;
 use wordcraft_ui_egui::async_saves::{AsyncSaves, SaveOutcome};
 use wordcraft_ui_egui::{Inbox, Services, WordApp};
 
-const DOC_EXTS: &[&str] = &["docx", "docm", "dotx", "dotm", "doc", "dot", "odt", "rtf", "txt", "md", "html", "htm", "tex", "json", "xml"];
-const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "wmf", "emf"];
+use crate::host_protocol::{DOC_EXTS, IMAGE_EXTS};
 const RECIPIENT_EXTS: &[&str] = wordcraft_engine::cmd::mailings::RECIPIENT_EXTENSIONS;
 mod font_store;
+mod host;
 const CANVAS_ID: &str = "wordcraft_canvas";
 const LOADING_ID: &str = "wordcraft_loading";
 
@@ -56,11 +56,13 @@ pub fn start() {
                     // The browser's locale picks the new document's paper, the units and the
                     // decimal separator (#838).
                     let region = wordcraft_ui_egui::i18n::system_region();
+                    let messages = Rc::new(RefCell::new(Vec::new()));
                     let sample = query().contains("sample");
                     let doc = if sample { wordcraft_engine::sample::sample_document() } else { wordcraft_engine::blank_document(&region) };
+                    // A file the address names (`?file=`, #web-embed) opens once fetched.
+                    let from_url = host::open_from_url(&query(), inbox.clone(), cc.egui_ctx.clone(), messages.clone());
                     let mut session = Session::new(doc);
                     session.system_region = region;
-                    let messages = Rc::new(RefCell::new(Vec::new()));
                     let mut app = WordApp::new(session, services(inbox.clone(), cc.egui_ctx.clone(), dirty, saves.clone(), messages.clone()));
                     // Pasted pictures wait apart from dropped files: the app inserts one only when the page is the edit target (#1349).
                     app.services.pasted = Some(pasted);
@@ -76,10 +78,15 @@ pub fn start() {
                     }
                     let prefs = crate::prefs::PrefsSync::new(stored);
                     // No document to show: start on File › Home, as the desktop app does (#766).
-                    if !sample {
+                    if !sample && !from_url {
                         app.start_screen();
                     }
-                    Ok(Box::new(WebShell { app, inbox, messages, prefs }))
+                    // The hosting page's API (`window.wordcraft`, `postMessage`; #web-embed).
+                    let host = host::Host::default();
+                    if let Err(e) = host::install(&host, inbox.clone(), cc.egui_ctx.clone()) {
+                        log::error!("the host page API is unavailable: {e}");
+                    }
+                    Ok(Box::new(WebShell { app, inbox, messages, prefs, host }))
                 }),
             )
             .await;
@@ -103,6 +110,7 @@ struct WebShell {
     inbox: Inbox,
     messages: Rc<RefCell<Vec<String>>>,
     prefs: crate::prefs::PrefsSync,
+    host: host::Host,
 }
 
 fn local_storage() -> Option<web_sys::Storage> {
@@ -136,6 +144,8 @@ impl eframe::App for WebShell {
             self.app.status(msg);
         }
         self.app.logic(ctx);
+        // After the app's frame, so a file the host handed in first has opened (#web-embed).
+        self.host.drain(&self.app);
         // Store changed preferences straight away: a reload or closed tab runs no exit code (#2132).
         if let Some(json) = self.prefs.changed(&self.app) {
             match local_storage() {
