@@ -29,10 +29,12 @@ pub fn to_pdf(name: &str, bytes: &[u8], opts: &Options) -> Result<Vec<u8>, Strin
 
 /// Make a font (TTF, OTF, TTC, WOFF, WOFF2) available to later conversions: the browser has no
 /// system fonts, so text in a font WordCraft doesn't bundle falls back otherwise. Returns the
-/// families it added.
+/// families it added, sorted, each once.
 pub fn add_font(name: &str, bytes: &[u8]) -> Result<Vec<String>, String> {
     let installed = wordcraft_fonts::FontDb::global().install_font(name, bytes).map_err(|e| e.to_string())?;
     let mut families: Vec<String> = installed.font.faces.into_iter().map(|(family, _)| family).collect();
+    // A font file lists each family once per style, not always next to each other.
+    families.sort();
     families.dedup();
     Ok(families)
 }

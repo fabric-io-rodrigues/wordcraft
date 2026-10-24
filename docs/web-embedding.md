@@ -82,10 +82,11 @@ trust; whoever serves the editor does:
 <script>
   const wc = document.getElementById("wc").contentWindow;
   const target = "https://example.org";
-  addEventListener("message", (e) => {
+  addEventListener("message", async (e) => {
     if (e.origin !== target) return;
     if (e.data.type === "wordcraft:ready") {
-      wc.postMessage({ type: "wordcraft:open", id: 1, name: "report.docx", data: bytes }, target);
+      const bytes = await (await fetch("report.docx")).arrayBuffer();
+      wc.postMessage({ type: "wordcraft:open", id: 1, name: "report.docx", data: bytes }, target, [bytes]);
       wc.postMessage({ type: "wordcraft:export", id: 2, format: "pdf" }, target);
     }
     if (e.data.type === "wordcraft:exported") save(new Blob([e.data.data], { type: "application/pdf" }));

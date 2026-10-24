@@ -10,6 +10,10 @@ pub(crate) const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "b
 
 /// Largest file a host hands in, as `wordcraft_engine::io::convert_bytes` reads.
 pub(crate) const MAX_HOST_FILE_BYTES: usize = wordcraft_engine::io::MAX_CONVERT_BYTES;
+/// Most requests waiting to be answered; more are refused until the app catches up.
+pub(crate) const MAX_PENDING_REQUESTS: usize = 16;
+/// Most document bytes waiting in queued opens, together.
+pub(crate) const MAX_PENDING_BYTES: usize = MAX_HOST_FILE_BYTES;
 /// Longest file name kept from a host (characters).
 const MAX_NAME_CHARS: usize = 255;
 
@@ -154,6 +158,75 @@ pub(crate) fn origin_listed(listed: &[String], origin: &str) -> bool {
     listed.iter().any(|o| o.eq_ignore_ascii_case(origin))
 }
 
+/// The hosting page's requests, waiting to be answered in the order they came. Each holds the
+/// bytes it carries (a document to open; 0 for an export), counted against
+/// [`MAX_PENDING_BYTES`]; at most [`MAX_PENDING_REQUESTS`] wait. While the `?file=` document is
+/// being fetched nothing is handed out, so no request is answered against the blank document it
+/// replaces.
+pub(crate) struct Pending<T> {
+    items: std::collections::VecDeque<(usize, T)>,
+    bytes: usize,
+    fetching: bool,
+}
+
+impl<T> Default for Pending<T> {
+    fn default() -> Self {
+        Pending { items: std::collections::VecDeque::new(), bytes: 0, fetching: false }
+    }
+}
+
+impl<T> Pending<T> {
+    /// Whether a request carrying `bytes` would be taken now: checked before its bytes are
+    /// copied, so a refused one costs no memory.
+    pub(crate) fn admit(&self, bytes: usize) -> Result<(), String> {
+        if self.items.len() >= MAX_PENDING_REQUESTS {
+            return Err(format!("{MAX_PENDING_REQUESTS} requests are already waiting; try again once they are answered"));
+        }
+        if bytes > MAX_PENDING_BYTES.saturating_sub(self.bytes) {
+            return Err(format!("the files waiting to open would pass {} MB; try again once they have opened", MAX_PENDING_BYTES >> 20));
+        }
+        Ok(())
+    }
+
+    /// Queue a request after the others, or hand it back with the reason it was refused.
+    pub(crate) fn push(&mut self, bytes: usize, item: T) -> Result<(), (String, T)> {
+        self.insert(bytes, item, false)
+    }
+
+    /// Queue a request before the others (the `?file=` document), or hand it back refused.
+    pub(crate) fn push_front(&mut self, bytes: usize, item: T) -> Result<(), (String, T)> {
+        self.insert(bytes, item, true)
+    }
+
+    fn insert(&mut self, bytes: usize, item: T, front: bool) -> Result<(), (String, T)> {
+        if let Err(e) = self.admit(bytes) {
+            return Err((e, item));
+        }
+        self.bytes = self.bytes.saturating_add(bytes);
+        if front {
+            self.items.push_front((bytes, item))
+        } else {
+            self.items.push_back((bytes, item))
+        }
+        Ok(())
+    }
+
+    /// Hold every request (while the `?file=` document is fetched) or let them go.
+    pub(crate) fn set_fetching(&mut self, fetching: bool) {
+        self.fetching = fetching;
+    }
+
+    /// The next request to answer, unless a fetch holds them all.
+    pub(crate) fn next(&mut self) -> Option<T> {
+        if self.fetching {
+            return None;
+        }
+        let (bytes, item) = self.items.pop_front()?;
+        self.bytes = self.bytes.saturating_sub(bytes);
+        Some(item)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,6 +313,39 @@ mod tests {
         // The shipped page carries the tag, empty: a deployment fills it in.
         let page = include_str!("../index.html");
         assert!(page.contains(&format!("<meta name=\"{EMBED_ORIGINS_META}\" content=\"\">")));
+    }
+
+    #[test]
+    fn requests_are_answered_in_order_after_the_fetched_file() {
+        let mut q = Pending::default();
+        q.set_fetching(true);
+        q.push(0, "export 1").unwrap();
+        q.push(10, "open b").unwrap();
+        q.push(0, "export 2").unwrap();
+        assert_eq!(q.next(), None, "nothing goes while ?file= is fetched");
+        q.push_front(5, "open ?file=").unwrap();
+        q.set_fetching(false);
+        let order: Vec<_> = std::iter::from_fn(|| q.next()).collect();
+        assert_eq!(order, ["open ?file=", "export 1", "open b", "export 2"]);
+        assert_eq!(q.bytes, 0, "answered requests release their bytes");
+    }
+
+    #[test]
+    fn the_queue_is_bounded_before_bytes_are_copied() {
+        let mut q = Pending::default();
+        q.push(MAX_PENDING_BYTES - 10, "big").unwrap();
+        assert!(q.admit(11).is_err(), "over the byte budget");
+        assert!(q.admit(10).is_ok());
+        let (e, back) = q.push(usize::MAX, "huge").unwrap_err();
+        assert!(e.contains("MB") && back == "huge", "refused requests come back to be answered");
+        assert!(q.admit(0).is_ok(), "exports carry no bytes");
+        for _ in 1..MAX_PENDING_REQUESTS {
+            q.push(0, "export").unwrap();
+        }
+        assert!(q.admit(0).unwrap_err().contains("waiting"), "count cap");
+        assert!(q.push_front(0, "?file=").is_err());
+        assert_eq!(q.next(), Some("big"));
+        assert!(q.admit(MAX_PENDING_BYTES).is_ok(), "room again once answered");
     }
 
     #[test]

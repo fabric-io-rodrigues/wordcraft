@@ -5,8 +5,7 @@
 //! document every open before it left. What is accepted is decided in `host_protocol`; see
 //! `docs/web-embedding.md`.
 
-use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use serde_json::json;
@@ -15,7 +14,10 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
 use wordcraft_ui_egui::WordApp;
 
-use crate::host_protocol::{self as hp, Kind};
+use crate::host_protocol::{self as hp, Kind, Pending};
+
+/// How long a `?file=` download may take, body included, before it is abandoned (ms).
+const FETCH_TIMEOUT_MS: i32 = 120_000;
 
 /// What a request came to.
 enum Done {
@@ -96,24 +98,36 @@ enum Request {
     Export { format: String, markup: Option<bool>, reply: Reply },
 }
 
-/// The hosting page's requests, answered from the app's frames in the order they came.
+impl Request {
+    /// The bytes it holds while it waits (a document to open), counted against the queue's budget.
+    fn bytes(&self) -> usize {
+        match self {
+            Request::Open { bytes, .. } => bytes.len(),
+            Request::Export { .. } => 0,
+        }
+    }
+
+    /// Answer a request that was refused without running it.
+    fn refuse(self, e: String) {
+        match self {
+            Request::Open { reply, .. } | Request::Export { reply, .. } => reply.send(Err(e)),
+        }
+    }
+}
+
+/// The hosting page's requests, answered from the app's frames in the order they came, held
+/// while the `?file=` document is fetched, and bounded in count and bytes ([`Pending`]).
 #[derive(Clone, Default)]
 pub(crate) struct Host {
-    queue: Rc<RefCell<VecDeque<Request>>>,
-    /// The `?file=` document is still being fetched: requests wait for it, so an export made
-    /// meanwhile doesn't get the blank document it replaces.
-    fetching: Rc<Cell<bool>>,
+    queue: Rc<RefCell<Pending<Request>>>,
 }
 
 impl Host {
     /// Answer the requests made since the last frame, in order, once no `?file=` fetch is pending.
     pub(crate) fn drain(&self, app: &mut WordApp) {
-        if self.fetching.get() {
-            return;
-        }
         loop {
             // Each request is taken alone: answering one runs page code that may queue another.
-            let Some(req) = self.queue.borrow_mut().pop_front() else { break };
+            let Some(req) = self.queue.borrow_mut().next() else { break };
             match req {
                 Request::Open { name, bytes, discard, reply } => reply.send(open(app, &name, &bytes, discard).map(Done::Opened)),
                 Request::Export { format, markup, reply } => reply.send(export(app, &format, markup).map(|b| Done::Exported(format, b))),
@@ -121,10 +135,13 @@ impl Host {
         }
     }
 
-    /// Queue a request and wake the app to answer it.
+    /// Queue a request and wake the app to answer it, or answer at once that the queue is full.
     fn ask(&self, ctx: &egui::Context, req: Request) {
-        self.queue.borrow_mut().push_back(req);
-        ctx.request_repaint();
+        let pushed = self.queue.borrow_mut().push(req.bytes(), req);
+        match pushed {
+            Ok(()) => ctx.request_repaint(),
+            Err((e, req)) => req.refuse(e),
+        }
     }
 }
 
@@ -141,7 +158,9 @@ fn open(app: &mut WordApp, name: &str, bytes: &[u8], discard: bool) -> Result<St
     Ok(name.to_string())
 }
 
-/// The open document as `format`, as File › Export writes it.
+/// The open document as `format`, as File › Export writes it. This calls the engine's writer
+/// rather than a registered command: the bytes go back to the page instead of to a file, and
+/// `file.export*` commands take a path to write to.
 fn export(app: &WordApp, format: &str, markup: Option<bool>) -> Result<Vec<u8>, String> {
     if !app.has_document() {
         return Err("no document is open".into());
@@ -162,21 +181,21 @@ fn get(obj: &JsValue, key: &str) -> JsValue {
 }
 
 /// An open request from what the host handed in: a document name and its bytes, refused over the
-/// size cap before they are copied.
-fn open_request(name: &JsValue, data: &JsValue, opts: &JsValue, reply: Reply) -> Result<Request, (String, Reply)> {
+/// size cap or the queue's budget before they are copied.
+fn open_request(host: &Host, name: &JsValue, data: &JsValue, opts: &JsValue, reply: Reply) -> Result<Request, (String, Reply)> {
     let checked = (|| {
         let name = name.as_string().ok_or("the file needs a name, such as \"report.docx\"")?;
         let name = hp::accepted_name(&name, &[hp::DOC_EXTS])?;
-        let bytes = if let Some(a) = data.dyn_ref::<js_sys::Uint8Array>() {
-            hp::size_ok(f64::from(a.length()))?;
-            a.to_vec()
+        let array = if let Some(a) = data.dyn_ref::<js_sys::Uint8Array>() {
+            a.clone()
         } else if let Some(b) = data.dyn_ref::<js_sys::ArrayBuffer>() {
-            hp::size_ok(f64::from(b.byte_length()))?;
-            js_sys::Uint8Array::new(b).to_vec()
+            js_sys::Uint8Array::new(b)
         } else {
             return Err("the file's data must be a Uint8Array or an ArrayBuffer".to_string());
         };
-        Ok((name, bytes))
+        hp::size_ok(f64::from(array.length()))?;
+        host.queue.borrow().admit(usize::try_from(array.length()).unwrap_or(usize::MAX))?;
+        Ok((name, array.to_vec()))
     })();
     match checked {
         Ok((name, bytes)) => Ok(Request::Open { name, bytes, discard: get(opts, "discardChanges").as_bool().unwrap_or(false), reply }),
@@ -218,24 +237,54 @@ pub(crate) fn open_from_url(search: &str, host: &Host, ctx: egui::Context, messa
     };
     let given_name = hp::query_param(search, "name");
     let host = host.clone();
-    host.fetching.set(true);
+    host.queue.borrow_mut().set_fetching(true);
     wasm_bindgen_futures::spawn_local(async move {
         let reply = Reply::Status(messages);
         match fetch(&raw, given_name.as_deref()).await {
-            Ok((name, bytes)) => host.queue.borrow_mut().push_front(Request::Open { name, bytes, discard: false, reply }),
+            Ok((name, bytes)) => {
+                let req = Request::Open { name, bytes, discard: false, reply };
+                let pushed = host.queue.borrow_mut().push_front(req.bytes(), req);
+                if let Err((e, req)) = pushed {
+                    req.refuse(e);
+                }
+            }
             Err(e) => reply.send(Err(e)),
         }
-        host.fetching.set(false);
+        host.queue.borrow_mut().set_fetching(false);
         ctx.request_repaint();
     });
     true
 }
 
 /// Fetch `raw` (resolved against the page) as a document: its name and bytes. The body is read in
-/// chunks and the download cancelled once it passes the size cap, whatever `Content-Length` said.
+/// chunks and the download cancelled once it passes the size cap, whatever `Content-Length` said,
+/// or once it has taken [`FETCH_TIMEOUT_MS`], so a stalled server can't hold the requests that
+/// wait for it.
 async fn fetch(raw: &str, given_name: Option<&str>) -> Result<(String, Vec<u8>), String> {
-    let js = |e: JsValue| format!("{e:?}");
     let window = web_sys::window().ok_or("no window")?;
+    let abort = web_sys::AbortController::new().map_err(|e| format!("{e:?}"))?;
+    let on_timeout = {
+        let abort = abort.clone();
+        Closure::once_into_js(move || abort.abort())
+    };
+    let timer =
+        window.set_timeout_with_callback_and_timeout_and_arguments_0(on_timeout.unchecked_ref(), FETCH_TIMEOUT_MS).map_err(|e| format!("{e:?}"))?;
+    let result = fetch_with(&window, raw, given_name, &abort.signal()).await;
+    window.clear_timeout_with_handle(timer);
+    if abort.signal().aborted() {
+        return Err(format!("{raw}: no answer within {} s", FETCH_TIMEOUT_MS / 1000));
+    }
+    result
+}
+
+/// [`fetch`] with `signal` aborting the request and the body.
+async fn fetch_with(
+    window: &web_sys::Window,
+    raw: &str,
+    given_name: Option<&str>,
+    signal: &web_sys::AbortSignal,
+) -> Result<(String, Vec<u8>), String> {
+    let js = |e: JsValue| format!("{e:?}");
     let base = window.location().href().map_err(js)?;
     let url = web_sys::Url::new_with_base(raw, &base).map_err(|_| format!("{raw:?} is not a URL"))?;
     let href = url.href();
@@ -243,7 +292,9 @@ async fn fetch(raw: &str, given_name: Option<&str>) -> Result<(String, Vec<u8>),
         return Err(format!("{href:?}: only http, https and blob addresses are opened"));
     }
     let name = hp::accepted_name(&given_name.map_or_else(|| hp::name_from_url(&href), str::to_string), &[hp::DOC_EXTS])?;
-    let resp: web_sys::Response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(&href))
+    let init = web_sys::RequestInit::new();
+    init.set_signal(Some(signal));
+    let resp: web_sys::Response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str_and_init(&href, &init))
         .await
         .map_err(|e| format!("{href} couldn't be fetched: {}", js(e)))?
         .dyn_into()
@@ -284,7 +335,7 @@ pub(crate) fn install(host: &Host, ctx: egui::Context) -> Result<(), String> {
 
     let (open_host, open_ctx) = (host.clone(), ctx.clone());
     let open = Closure::<dyn Fn(JsValue, JsValue, JsValue) -> js_sys::Promise>::new(move |name: JsValue, data: JsValue, opts: JsValue| {
-        promise(&open_host, &open_ctx, |reply| open_request(&name, &data, &opts, reply))
+        promise(&open_host, &open_ctx, |reply| open_request(&open_host, &name, &data, &opts, reply))
     });
     set(&api, "open", &open.into_js_value());
 
@@ -350,7 +401,7 @@ fn listen_for_messages(window: &web_sys::Window, host: Host, ctx: egui::Context)
         let Some(kind) = get(&data, "type").as_string().as_deref().and_then(Kind::parse) else { return };
         let reply = Reply::Message { target: reply_to.clone(), origin, id: get(&data, "id") };
         let req = match kind {
-            Kind::Open => open_request(&get(&data, "name"), &get(&data, "data"), &data, reply),
+            Kind::Open => open_request(&host, &get(&data, "name"), &get(&data, "data"), &data, reply),
             Kind::Export => export_request(&get(&data, "format"), &data, reply),
         };
         submit(&host, &ctx, req);
